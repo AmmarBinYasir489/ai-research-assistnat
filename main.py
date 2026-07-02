@@ -7,6 +7,7 @@ import requests
 from dotenv import load_dotenv
 
 from tools.article_reader import enrich_with_article_text
+from tools.brave_search import BraveSearchError, brave_search
 from tools.google_news import GoogleNewsError, google_news_search
 from tools.google_search import SearchError, google_search
 from tools.searxng_search import SearxngSearchError, searxng_search
@@ -25,6 +26,25 @@ MAX_ALLOWED_ARTICLE_AGE_DAYS = 365
 
 def clamp(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(value, maximum))
+
+
+def normalize_search_tools(research_mode: str, search_tools: list[str]) -> list[str]:
+    preferred_by_mode = {
+        "news": ["google_news", "brave"],
+        "web": ["brave", "searxng", "serpapi"],
+        "hybrid": ["google_news", "brave", "searxng"],
+    }
+    preferred = preferred_by_mode.get(research_mode, ["brave", "searxng"])
+    ordered_tools = []
+
+    for tool in preferred + search_tools:
+        if tool not in {"google_news", "brave", "searxng", "serpapi"}:
+            continue
+        if tool in ordered_tools:
+            continue
+        ordered_tools.append(tool)
+
+    return ordered_tools
 
 
 def ask_ollama(prompt: str, json_mode: bool = False, max_tokens: int = 350) -> tuple[str | None, str | None]:
@@ -90,7 +110,7 @@ Choose the best research mode, query, freshness rule, and source count.
 
 Rules:
 - research_mode must be one of: "news", "web", "hybrid".
-- search_tools can include: "google_news", "searxng", "serpapi".
+- search_tools can include: "google_news", "brave", "searxng", "serpapi".
 - For "latest", "today", "this week", or news questions, use a small max_age_days.
 - For patents, named inventors, patent numbers, assignees, historical facts, or old technical records, use research_mode "web" and set requires_freshness to false.
 - Old sources can still be valid evidence when the user asks for a specific patent, document, person, or record.
@@ -102,7 +122,7 @@ Rules:
 Schema:
 {{
   "research_mode": "hybrid",
-  "search_tools": ["google_news", "searxng"],
+  "search_tools": ["google_news", "brave"],
   "search_query": "...",
   "search_result_count": 15,
   "final_source_count": 5,
@@ -118,7 +138,7 @@ User question:
     if not response:
         return {
             "research_mode": "web",
-            "search_tools": ["searxng"],
+            "search_tools": ["brave", "searxng"],
             "search_query": user_question,
             "search_result_count": SEARCH_RESULT_COUNT,
             "final_source_count": FINAL_SOURCE_COUNT,
@@ -154,14 +174,8 @@ User question:
         search_tools = []
     search_tools = [tool for tool in search_tools if isinstance(tool, str)]
     search_tools = [tool.lower().strip() for tool in search_tools]
-    search_tools = [tool for tool in search_tools if tool in {"google_news", "searxng", "serpapi"}]
-    if not search_tools:
-        if research_mode == "news":
-            search_tools = ["google_news"]
-        elif research_mode == "hybrid":
-            search_tools = ["google_news", "searxng"]
-        else:
-            search_tools = ["searxng"]
+    search_tools = [tool for tool in search_tools if tool in {"google_news", "brave", "searxng", "serpapi"}]
+    search_tools = normalize_search_tools(research_mode, search_tools)
 
     if not isinstance(search_result_count, int):
         search_result_count = SEARCH_RESULT_COUNT
@@ -310,6 +324,9 @@ def search_with_tool(tool: str, query: str, max_results: int) -> list[dict[str, 
     if tool == "google_news":
         return google_news_search(query, max_results=max_results)
 
+    if tool == "brave":
+        return brave_search(query, max_results=max_results)
+
     if tool == "searxng":
         return searxng_search(query, max_results=max_results)
 
@@ -327,7 +344,7 @@ def search_web(query: str, search_result_count: int, search_tools: list[str]) ->
     for tool in search_tools:
         try:
             tool_results = search_with_tool(tool, query, per_tool_count)
-        except (GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
+        except (BraveSearchError, GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
             errors.append(f"{tool}: {error}")
             continue
 
@@ -368,7 +385,7 @@ def main() -> None:
 
     try:
         results = search_web(search_query, search_result_count, search_tools)
-    except (GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
+    except (BraveSearchError, GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
         print(f"Search failed: {error}")
         return
 

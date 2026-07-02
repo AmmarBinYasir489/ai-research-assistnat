@@ -10,7 +10,7 @@ class SearchError(RuntimeError):
 
 def google_search(query: str, max_results: int = 6) -> list[dict[str, str]]:
     api_key = os.getenv("SERPAPI_API_KEY")
-    if not api_key:
+    if not api_key or api_key == "your_serpapi_key_here":
         raise SearchError("Missing SERPAPI_API_KEY. Add it to your .env file.")
 
     response = requests.get(
@@ -40,4 +40,3 @@ def google_search(query: str, max_results: int = 6) -> list[dict[str, str]]:
         )
 
     return results
-
