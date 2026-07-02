@@ -83,23 +83,26 @@ User question:
     return query.strip()
 
 
-def make_research_plan(user_question: str) -> dict[str, int | str]:
+def make_research_plan(user_question: str) -> dict[str, int | str | list[str]]:
     prompt = f"""
 You are planning a research task.
 Choose the best research mode, query, freshness rule, and source count.
 
 Rules:
-- research_mode must be one of: "news", "web".
+- research_mode must be one of: "news", "web", "hybrid".
+- search_tools can include: "google_news", "searxng", "serpapi".
 - For "latest", "today", "this week", or news questions, use a small max_age_days.
 - For patents, named inventors, patent numbers, assignees, historical facts, or old technical records, use research_mode "web" and set requires_freshness to false.
 - Old sources can still be valid evidence when the user asks for a specific patent, document, person, or record.
 - For broad trend questions, inspect more articles.
+- For "latest trends", "current landscape", or questions needing both recency and background, use research_mode "hybrid".
 - final_source_count must be smaller than or equal to search_result_count.
 - Return JSON only.
 
 Schema:
 {{
-  "research_mode": "news",
+  "research_mode": "hybrid",
+  "search_tools": ["google_news", "searxng"],
   "search_query": "...",
   "search_result_count": 15,
   "final_source_count": 5,
@@ -115,6 +118,7 @@ User question:
     if not response:
         return {
             "research_mode": "web",
+            "search_tools": ["searxng"],
             "search_query": user_question,
             "search_result_count": SEARCH_RESULT_COUNT,
             "final_source_count": FINAL_SOURCE_COUNT,
@@ -129,6 +133,7 @@ User question:
         parsed = {}
 
     research_mode = parsed.get("research_mode", "web")
+    search_tools = parsed.get("search_tools", [])
     search_query = parsed.get("search_query")
     if not isinstance(search_query, str) or not search_query.strip():
         search_query = make_search_query(user_question)
@@ -142,8 +147,21 @@ User question:
     if not isinstance(research_mode, str):
         research_mode = "web"
     research_mode = research_mode.lower().strip()
-    if research_mode not in {"news", "web"}:
+    if research_mode not in {"news", "web", "hybrid"}:
         research_mode = "web"
+
+    if not isinstance(search_tools, list):
+        search_tools = []
+    search_tools = [tool for tool in search_tools if isinstance(tool, str)]
+    search_tools = [tool.lower().strip() for tool in search_tools]
+    search_tools = [tool for tool in search_tools if tool in {"google_news", "searxng", "serpapi"}]
+    if not search_tools:
+        if research_mode == "news":
+            search_tools = ["google_news"]
+        elif research_mode == "hybrid":
+            search_tools = ["google_news", "searxng"]
+        else:
+            search_tools = ["searxng"]
 
     if not isinstance(search_result_count, int):
         search_result_count = SEARCH_RESULT_COUNT
@@ -163,6 +181,7 @@ User question:
 
     return {
         "research_mode": research_mode,
+        "search_tools": search_tools,
         "search_query": search_query.strip(),
         "search_result_count": search_result_count,
         "final_source_count": final_source_count,
@@ -244,6 +263,23 @@ def select_results_without_freshness_filter(
     return results[:final_source_count], results[final_source_count:]
 
 
+def deduplicate_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen = set()
+    unique_results = []
+
+    for result in results:
+        url = result.get("url", "").split("?")[0].rstrip("/")
+        title = " ".join(result.get("title", "").lower().split())
+        key = url or title
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        unique_results.append(result)
+
+    return unique_results
+
+
 def answer_with_sources(user_question: str, results: list[dict[str, str]], final_source_count: int) -> str:
     sources = format_sources(results, final_source_count)
     prompt = f"""
@@ -270,22 +306,41 @@ Search results:
     )
 
 
-def search_web(query: str, search_result_count: int, research_mode: str) -> list[dict[str, str]]:
-    provider = os.getenv("SEARCH_PROVIDER", "searxng").lower()
+def search_with_tool(tool: str, query: str, max_results: int) -> list[dict[str, str]]:
+    if tool == "google_news":
+        return google_news_search(query, max_results=max_results)
 
-    if provider == "serpapi":
-        return google_search(query, max_results=search_result_count)
+    if tool == "searxng":
+        return searxng_search(query, max_results=max_results)
 
-    if provider == "google_news":
-        return google_news_search(query, max_results=search_result_count)
+    if tool == "serpapi":
+        return google_search(query, max_results=max_results)
 
-    if provider == "searxng":
+    raise SearchError(f"Unknown search tool: {tool}")
+
+
+def search_web(query: str, search_result_count: int, search_tools: list[str]) -> list[dict[str, str]]:
+    results = []
+    errors = []
+    per_tool_count = max(3, search_result_count)
+
+    for tool in search_tools:
         try:
-            return searxng_search(query, max_results=search_result_count)
-        except SearxngSearchError:
-            return google_news_search(query, max_results=search_result_count)
+            tool_results = search_with_tool(tool, query, per_tool_count)
+        except (GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
+            errors.append(f"{tool}: {error}")
+            continue
 
-    raise SearchError("SEARCH_PROVIDER must be 'searxng', 'google_news', or 'serpapi'.")
+        for result in tool_results:
+            result["search_tool"] = tool
+        results.extend(tool_results)
+
+    results = deduplicate_results(results)
+    if results:
+        return results[:search_result_count]
+
+    error_details = "; ".join(errors) if errors else "no tools were selected"
+    raise SearchError(f"All search tools failed: {error_details}")
 
 
 def main() -> None:
@@ -297,6 +352,7 @@ def main() -> None:
     plan = make_research_plan(user_question)
     search_query = str(plan["search_query"])
     research_mode = str(plan["research_mode"])
+    search_tools = list(plan["search_tools"])
     search_result_count = int(plan["search_result_count"])
     final_source_count = int(plan["final_source_count"])
     max_age_days = int(plan["max_age_days"])
@@ -304,13 +360,14 @@ def main() -> None:
     print(f"\nSearch query: {search_query}\n")
     print(
         "Research plan: "
-        f"mode {research_mode}, inspect {search_result_count} results, keep {final_source_count}, "
+        f"mode {research_mode}, tools {', '.join(search_tools)}, "
+        f"inspect {search_result_count} results, keep {final_source_count}, "
         f"{'reject articles older than ' + str(max_age_days) + ' days' if requires_freshness else 'do not reject old dated sources'}.\n"
         f"Reason: {plan['reason']}\n"
     )
 
     try:
-        results = search_web(search_query, search_result_count, research_mode)
+        results = search_web(search_query, search_result_count, search_tools)
     except (GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
         print(f"Search failed: {error}")
         return
