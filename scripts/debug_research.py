@@ -19,7 +19,6 @@ from main import (  # noqa: E402
 )
 from tools.evidence_evaluator import evaluate_evidence  # noqa: E402
 from tools.result_ranker import rank_results  # noqa: E402
-from tools.brave_search import BraveSearchError  # noqa: E402
 from tools.google_news import GoogleNewsError  # noqa: E402
 from tools.google_search import SearchError  # noqa: E402
 from tools.searxng_search import SearxngSearchError  # noqa: E402
@@ -70,7 +69,7 @@ def main() -> None:
     for tool in search_tools:
         try:
             tool_results = search_with_tool(tool, search_query, search_result_count)
-        except (BraveSearchError, GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
+        except (GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
             errors.append(f"{tool}: {error}")
             print(f"{tool}: failed ({error})")
             continue

@@ -1,11 +1,30 @@
-from html import unescape
-from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import requests
 
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
 
-class ArticleTextParser(HTMLParser):
+from html import unescape
+from html.parser import HTMLParser
+
+
+DROP_SELECTORS = [
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "nav",
+    "footer",
+    "header",
+    "form",
+    "aside",
+]
+
+
+class FallbackArticleTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self._skip_depth = 0
@@ -13,7 +32,7 @@ class ArticleTextParser(HTMLParser):
         self._parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "header"}:
+        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "header", "form", "aside"}:
             self._skip_depth += 1
             return
 
@@ -24,7 +43,7 @@ class ArticleTextParser(HTMLParser):
             self._capture_tag = tag
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "header"}:
+        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "header", "form", "aside"}:
             self._skip_depth = max(0, self._skip_depth - 1)
             return
 
@@ -49,6 +68,33 @@ class ArticleTextParser(HTMLParser):
         return "\n".join(lines)
 
 
+def extract_text_with_fallback_parser(html: str) -> str:
+    parser = FallbackArticleTextParser()
+    parser.feed(html)
+    return parser.text()
+
+
+def extract_text_from_html(html: str) -> str:
+    if BeautifulSoup is None:
+        return extract_text_with_fallback_parser(html)
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    for selector in DROP_SELECTORS:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    main_content = soup.find("article") or soup.find("main") or soup.body or soup
+    text_blocks = []
+
+    for tag in main_content.find_all(["h1", "h2", "h3", "p", "li"]):
+        text = " ".join(tag.get_text(" ", strip=True).split())
+        if len(text) >= 40:
+            text_blocks.append(text)
+
+    return "\n".join(text_blocks)
+
+
 def read_article(url: str, max_chars: int = 1800) -> str | None:
     try:
         response = requests.get(
@@ -64,9 +110,7 @@ def read_article(url: str, max_chars: int = 1800) -> str | None:
     if "html" not in content_type:
         return None
 
-    parser = ArticleTextParser()
-    parser.feed(response.text)
-    text = parser.text()
+    text = extract_text_from_html(response.text)
     if not text:
         return None
 
