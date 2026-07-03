@@ -437,23 +437,16 @@ def main() -> None:
         print("Please enter a research question.")
         return
 
+    print("Planning research...")
     plan = make_research_plan(user_question)
     search_query = str(plan["search_query"])
-    research_mode = str(plan["research_mode"])
     search_tools = list(plan["search_tools"])
     search_result_count = int(plan["search_result_count"])
     final_source_count = int(plan["final_source_count"])
     max_age_days = int(plan["max_age_days"])
     requires_freshness = plan["requires_freshness"] == "yes"
     max_attempts = clamp(MAX_RESEARCH_ATTEMPTS, 1, MAX_ALLOWED_RESEARCH_ATTEMPTS)
-    print(f"\nSearch query: {search_query}\n")
-    print(
-        "Research plan: "
-        f"mode {research_mode}, tools {', '.join(search_tools)}, "
-        f"inspect {search_result_count} results, keep {final_source_count}, "
-        f"{'reject articles older than ' + str(max_age_days) + ' days' if requires_freshness else 'do not reject old dated sources'}.\n"
-        f"Reason: {plan['reason']}\n"
-    )
+    print("Searching and checking sources...")
 
     all_results = []
     all_rejected = []
@@ -467,7 +460,6 @@ def main() -> None:
         attempted_queries.add(search_query)
         trace.append({"attempt": str(attempt), "query": search_query})
 
-        print(f"Research attempt {attempt}/{max_attempts}: {search_query}")
         try:
             pass_results, rejected_results, evaluation = run_research_pass(
                 user_question,
@@ -486,11 +478,6 @@ def main() -> None:
         all_results = rank_results(search_query, all_results, requires_freshness)[:final_source_count]
         all_rejected.extend(rejected_results)
 
-        print(
-            f"Checked up to {search_result_count} results. "
-            f"Using {len(all_results)} results and rejecting {len(all_rejected)} extra/filtered results.\n"
-        )
-
         enough_information = bool(evaluation.get("enough_information"))
         next_query = evaluation.get("recommended_next_query")
         if enough_information or not isinstance(next_query, str) or not next_query.strip():
@@ -499,7 +486,7 @@ def main() -> None:
             break
 
         search_query = next_query.strip()
-        print(f"Evidence is weak. Retrying with: {search_query}\n")
+        print("Evidence is weak, refining the search...")
 
     if not all_results:
         if requires_freshness:
@@ -509,8 +496,9 @@ def main() -> None:
         return
 
     final_sources = format_sources(all_results, final_source_count)
+    print("Preparing answer...\n")
     evaluation = evaluate_evidence(user_question, final_sources, ask_ollama)
-    print(answer_with_evidence_check(user_question, all_results, final_source_count, evaluation, trace))
+    print(answer_with_evidence_check(user_question, all_results, final_source_count, evaluation, []))
 
 
 if __name__ == "__main__":
