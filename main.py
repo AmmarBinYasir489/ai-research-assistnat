@@ -10,6 +10,7 @@ from tools.article_reader import enrich_with_article_text
 from tools.brave_search import BraveSearchError, brave_search
 from tools.google_news import GoogleNewsError, google_news_search
 from tools.google_search import SearchError, google_search
+from tools.result_ranker import rank_results
 from tools.searxng_search import SearxngSearchError, searxng_search
 
 
@@ -247,10 +248,9 @@ def parse_result_date(result: dict[str, str]) -> datetime | None:
 def select_latest_results(
     results: list[dict[str, str]],
     max_age_days: int,
-    final_source_count: int,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
-    dated_results = []
+    selected_results = []
     rejected_results = []
 
     for result in results:
@@ -263,18 +263,15 @@ def select_latest_results(
             rejected_results.append(result)
             continue
 
-        dated_results.append((published_date, result))
+        selected_results.append(result)
 
-    dated_results.sort(key=lambda item: item[0], reverse=True)
-    selected = [result for _published_date, result in dated_results[:final_source_count]]
-    return selected, rejected_results
+    return selected_results, rejected_results
 
 
 def select_results_without_freshness_filter(
     results: list[dict[str, str]],
-    final_source_count: int,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    return results[:final_source_count], results[final_source_count:]
+    return results, []
 
 
 def deduplicate_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -390,9 +387,13 @@ def main() -> None:
         return
 
     if requires_freshness:
-        results, rejected_results = select_latest_results(results, max_age_days, final_source_count)
+        results, rejected_results = select_latest_results(results, max_age_days)
     else:
-        results, rejected_results = select_results_without_freshness_filter(results, final_source_count)
+        results, rejected_results = select_results_without_freshness_filter(results)
+    results = rank_results(search_query, results, requires_freshness)
+    extra_results = results[final_source_count:]
+    results = results[:final_source_count]
+    rejected_results = rejected_results + extra_results
     print(
         f"Checked up to {search_result_count} results. "
         f"Using {len(results)} results and rejecting {len(rejected_results)} extra/filtered results.\n"

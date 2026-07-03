@@ -14,6 +14,7 @@ from main import (  # noqa: E402
     select_latest_results,
     select_results_without_freshness_filter,
 )
+from tools.result_ranker import rank_results  # noqa: E402
 from tools.brave_search import BraveSearchError  # noqa: E402
 from tools.google_news import GoogleNewsError  # noqa: E402
 from tools.google_search import SearchError  # noqa: E402
@@ -90,9 +91,13 @@ def main() -> None:
     print(f"Removed: {len(raw_results) - len(unique_results)}")
 
     if requires_freshness:
-        selected, rejected = select_latest_results(unique_results, max_age_days, final_source_count)
+        selected, rejected = select_latest_results(unique_results, max_age_days)
     else:
-        selected, rejected = select_results_without_freshness_filter(unique_results, final_source_count)
+        selected, rejected = select_results_without_freshness_filter(unique_results)
+    selected = rank_results(search_query, selected, requires_freshness)
+    extra_results = selected[final_source_count:]
+    selected = selected[:final_source_count]
+    rejected = rejected + extra_results
 
     print("\n=== Filtering ===")
     print(f"Selected: {len(selected)}")
@@ -100,6 +105,9 @@ def main() -> None:
 
     print("\n=== Selected Results ===")
     print_result_titles(selected, limit=final_source_count)
+    print("\n=== Relevance Scores ===")
+    for index, result in enumerate(selected[:final_source_count], start=1):
+        print(f"  {index}. {result.get('relevance_score', '0.00')} - {result.get('title', '(no title)')}")
 
 
 if __name__ == "__main__":
