@@ -20,9 +20,11 @@ load_dotenv()
 SEARCH_RESULT_COUNT = int(os.getenv("SEARCH_RESULT_COUNT", "15"))
 FINAL_SOURCE_COUNT = int(os.getenv("FINAL_SOURCE_COUNT", "5"))
 MAX_ARTICLE_AGE_DAYS = int(os.getenv("MAX_ARTICLE_AGE_DAYS", "30"))
+MAX_RESEARCH_ATTEMPTS = int(os.getenv("MAX_RESEARCH_ATTEMPTS", "2"))
 MAX_ALLOWED_SEARCH_RESULTS = 20
 MAX_ALLOWED_FINAL_SOURCES = 8
 MAX_ALLOWED_ARTICLE_AGE_DAYS = 365
+MAX_ALLOWED_RESEARCH_ATTEMPTS = 3
 
 
 def clamp(value: int, minimum: int, maximum: int) -> int:
@@ -229,6 +231,16 @@ def format_source_links(results: list[dict[str, str]], final_source_count: int) 
     return "\n\n".join(lines)
 
 
+def format_research_trace(trace: list[dict[str, str]]) -> str:
+    if not trace:
+        return ""
+
+    lines = ["### Research Attempts"]
+    for item in trace:
+        lines.append(f"- Attempt {item['attempt']}: {item['query']}")
+    return "\n".join(lines)
+
+
 def parse_result_date(result: dict[str, str]) -> datetime | None:
     published_at = result.get("published_at")
     if not published_at:
@@ -291,7 +303,12 @@ def deduplicate_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
     return unique_results
 
 
-def answer_with_sources(user_question: str, results: list[dict[str, str]], final_source_count: int) -> str:
+def answer_with_sources(
+    user_question: str,
+    results: list[dict[str, str]],
+    final_source_count: int,
+    trace: list[dict[str, str]] | None = None,
+) -> str:
     sources = format_sources(results, final_source_count)
     prompt = f"""
 {SYSTEM_PROMPT}
@@ -305,9 +322,14 @@ Search results:
 {sources}
 """
     source_links = format_source_links(results, final_source_count)
+    trace_text = format_research_trace(trace or [])
     response, error = ask_ollama(prompt, max_tokens=450)
     if response:
-        return f"{response.strip()}\n\n### Sources Checked\n{source_links}"
+        parts = [response.strip()]
+        if trace_text:
+            parts.append(trace_text)
+        parts.append(f"### Sources Checked\n{source_links}")
+        return "\n\n".join(parts)
 
     return (
         "Ollama did not return the final summary.\n"
@@ -321,11 +343,11 @@ def answer_with_evidence_check(
     user_question: str,
     results: list[dict[str, str]],
     final_source_count: int,
+    evaluation: dict[str, object],
+    trace: list[dict[str, str]],
 ) -> str:
-    sources = format_sources(results, final_source_count)
-    evaluation = evaluate_evidence(user_question, sources, ask_ollama)
     evaluation_summary = format_evaluation_summary(evaluation)
-    answer = answer_with_sources(user_question, results, final_source_count)
+    answer = answer_with_sources(user_question, results, final_source_count, trace)
 
     return f"{evaluation_summary}\n\n{answer}"
 
@@ -367,6 +389,48 @@ def search_web(query: str, search_result_count: int, search_tools: list[str]) ->
     raise SearchError(f"All search tools failed: {error_details}")
 
 
+def process_results(
+    search_query: str,
+    results: list[dict[str, str]],
+    requires_freshness: bool,
+    max_age_days: int,
+    final_source_count: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    if requires_freshness:
+        selected_results, rejected_results = select_latest_results(results, max_age_days)
+    else:
+        selected_results, rejected_results = select_results_without_freshness_filter(results)
+
+    selected_results = rank_results(search_query, selected_results, requires_freshness)
+    extra_results = selected_results[final_source_count:]
+    selected_results = selected_results[:final_source_count]
+    rejected_results = rejected_results + extra_results
+    return selected_results, rejected_results
+
+
+def run_research_pass(
+    user_question: str,
+    search_query: str,
+    search_tools: list[str],
+    search_result_count: int,
+    final_source_count: int,
+    requires_freshness: bool,
+    max_age_days: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, object]]:
+    results = search_web(search_query, search_result_count, search_tools)
+    selected_results, rejected_results = process_results(
+        search_query,
+        results,
+        requires_freshness,
+        max_age_days,
+        final_source_count,
+    )
+    selected_results = enrich_with_article_text(selected_results, max_articles=final_source_count)
+    sources = format_sources(selected_results, final_source_count)
+    evaluation = evaluate_evidence(user_question, sources, ask_ollama)
+    return selected_results, rejected_results, evaluation
+
+
 def main() -> None:
     user_question = input("Research question: ").strip()
     if not user_question:
@@ -381,6 +445,7 @@ def main() -> None:
     final_source_count = int(plan["final_source_count"])
     max_age_days = int(plan["max_age_days"])
     requires_freshness = plan["requires_freshness"] == "yes"
+    max_attempts = clamp(MAX_RESEARCH_ATTEMPTS, 1, MAX_ALLOWED_RESEARCH_ATTEMPTS)
     print(f"\nSearch query: {search_query}\n")
     print(
         "Research plan: "
@@ -390,35 +455,62 @@ def main() -> None:
         f"Reason: {plan['reason']}\n"
     )
 
-    try:
-        results = search_web(search_query, search_result_count, search_tools)
-    except (GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
-        print(f"Search failed: {error}")
-        return
+    all_results = []
+    all_rejected = []
+    evaluation: dict[str, object] = {}
+    trace = []
+    attempted_queries = set()
 
-    if requires_freshness:
-        results, rejected_results = select_latest_results(results, max_age_days)
-    else:
-        results, rejected_results = select_results_without_freshness_filter(results)
-    results = rank_results(search_query, results, requires_freshness)
-    extra_results = results[final_source_count:]
-    results = results[:final_source_count]
-    rejected_results = rejected_results + extra_results
-    print(
-        f"Checked up to {search_result_count} results. "
-        f"Using {len(results)} results and rejecting {len(rejected_results)} extra/filtered results.\n"
-    )
-    if not results:
+    for attempt in range(1, max_attempts + 1):
+        if search_query in attempted_queries:
+            break
+        attempted_queries.add(search_query)
+        trace.append({"attempt": str(attempt), "query": search_query})
+
+        print(f"Research attempt {attempt}/{max_attempts}: {search_query}")
+        try:
+            pass_results, rejected_results, evaluation = run_research_pass(
+                user_question,
+                search_query,
+                search_tools,
+                search_result_count,
+                final_source_count,
+                requires_freshness,
+                max_age_days,
+            )
+        except (GoogleNewsError, SearchError, SearxngSearchError, requests.RequestException) as error:
+            print(f"Search failed: {error}")
+            return
+
+        all_results = deduplicate_results(all_results + pass_results)
+        all_results = rank_results(search_query, all_results, requires_freshness)[:final_source_count]
+        all_rejected.extend(rejected_results)
+
+        print(
+            f"Checked up to {search_result_count} results. "
+            f"Using {len(all_results)} results and rejecting {len(all_rejected)} extra/filtered results.\n"
+        )
+
+        enough_information = bool(evaluation.get("enough_information"))
+        next_query = evaluation.get("recommended_next_query")
+        if enough_information or not isinstance(next_query, str) or not next_query.strip():
+            break
+        if attempt >= max_attempts:
+            break
+
+        search_query = next_query.strip()
+        print(f"Evidence is weak. Retrying with: {search_query}\n")
+
+    if not all_results:
         if requires_freshness:
             print(f"No articles were published within the last {max_age_days} days.")
         else:
             print("No results found.")
         return
 
-    print("Reading selected pages...\n")
-    results = enrich_with_article_text(results, max_articles=final_source_count)
-
-    print(answer_with_evidence_check(user_question, results, final_source_count))
+    final_sources = format_sources(all_results, final_source_count)
+    evaluation = evaluate_evidence(user_question, final_sources, ask_ollama)
+    print(answer_with_evidence_check(user_question, all_results, final_source_count, evaluation, trace))
 
 
 if __name__ == "__main__":
