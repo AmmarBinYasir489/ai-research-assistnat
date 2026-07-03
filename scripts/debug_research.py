@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -8,12 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from main import (  # noqa: E402
+    ask_ollama,
     deduplicate_results,
+    format_sources,
     make_research_plan,
     search_with_tool,
     select_latest_results,
     select_results_without_freshness_filter,
 )
+from tools.evidence_evaluator import evaluate_evidence  # noqa: E402
 from tools.result_ranker import rank_results  # noqa: E402
 from tools.brave_search import BraveSearchError  # noqa: E402
 from tools.google_news import GoogleNewsError  # noqa: E402
@@ -108,6 +112,11 @@ def main() -> None:
     print("\n=== Relevance Scores ===")
     for index, result in enumerate(selected[:final_source_count], start=1):
         print(f"  {index}. {result.get('relevance_score', '0.00')} - {result.get('title', '(no title)')}")
+
+    print("\n=== Evidence Evaluation ===")
+    sources = format_sources(selected, final_source_count)
+    evaluation = evaluate_evidence(question, sources, ask_ollama)
+    print(json.dumps(evaluation, indent=2))
 
 
 if __name__ == "__main__":

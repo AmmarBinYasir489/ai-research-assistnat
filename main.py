@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from tools.article_reader import enrich_with_article_text
 from tools.brave_search import BraveSearchError, brave_search
+from tools.evidence_evaluator import evaluate_evidence, format_evaluation_summary
 from tools.google_news import GoogleNewsError, google_news_search
 from tools.google_search import SearchError, google_search
 from tools.result_ranker import rank_results
@@ -317,6 +318,19 @@ Search results:
     )
 
 
+def answer_with_evidence_check(
+    user_question: str,
+    results: list[dict[str, str]],
+    final_source_count: int,
+) -> str:
+    sources = format_sources(results, final_source_count)
+    evaluation = evaluate_evidence(user_question, sources, ask_ollama)
+    evaluation_summary = format_evaluation_summary(evaluation)
+    answer = answer_with_sources(user_question, results, final_source_count)
+
+    return f"{evaluation_summary}\n\n{answer}"
+
+
 def search_with_tool(tool: str, query: str, max_results: int) -> list[dict[str, str]]:
     if tool == "google_news":
         return google_news_search(query, max_results=max_results)
@@ -408,7 +422,7 @@ def main() -> None:
     print("Reading selected pages...\n")
     results = enrich_with_article_text(results, max_articles=final_source_count)
 
-    print(answer_with_sources(user_question, results, final_source_count))
+    print(answer_with_evidence_check(user_question, results, final_source_count))
 
 
 if __name__ == "__main__":
